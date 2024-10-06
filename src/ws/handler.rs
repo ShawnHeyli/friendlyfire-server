@@ -4,51 +4,11 @@ use axum::extract::{
     ws::{Message, WebSocket},
     ConnectInfo, State, WebSocketUpgrade,
 };
-use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::Sender;
 
 use crate::AppState;
 
-#[derive(Serialize, Deserialize, Debug)]
-pub enum WsMessage {
-    Media(MediaMessage),
-    ClientCount(ClientCountMessage),
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct MediaMessage {
-    media_url: String, // Actually a tauri::Url but we don't need the real type here
-    top_message: String,
-    bottom_message: String,
-    sender: User,
-    timeout: u64, // in milliseconds
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-struct User {
-    username: String,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-struct ClientCountMessage {
-    client_count: u64,
-}
-
-fn handle_client_connect(tx: Sender<Message>) {
-    let client_count = tx.receiver_count() as u64;
-    let message = WsMessage::ClientCount(ClientCountMessage { client_count });
-    if let Err(e) = tx.send(Message::Text(serde_json::to_string(&message).unwrap())) {
-        eprintln!("Failed to send client count update: {:?}", e);
-    }
-}
-
-fn handle_client_disconnect(tx: Sender<Message>) {
-    let client_count = (tx.receiver_count() - 1) as u64;
-    let message = WsMessage::ClientCount(ClientCountMessage { client_count });
-    if let Err(e) = tx.send(Message::Text(serde_json::to_string(&message).unwrap())) {
-        eprintln!("Failed to send client count update: {:?}", e);
-    }
-}
+use super::{ClientCountMessage, WsMessage};
 
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
@@ -107,5 +67,21 @@ async fn handle_socket(mut socket: WebSocket, app_state: Arc<AppState>, _addr: S
                 }
             }
         }
+    }
+}
+
+fn handle_client_connect(tx: Sender<Message>) {
+    let client_count = tx.receiver_count() as u64;
+    let message = WsMessage::ClientCount(ClientCountMessage::new(client_count));
+    if let Err(e) = tx.send(Message::Text(serde_json::to_string(&message).unwrap())) {
+        eprintln!("Failed to send client count update: {:?}", e);
+    }
+}
+
+fn handle_client_disconnect(tx: Sender<Message>) {
+    let client_count = (tx.receiver_count() - 1) as u64;
+    let message = WsMessage::ClientCount(ClientCountMessage::new(client_count));
+    if let Err(e) = tx.send(Message::Text(serde_json::to_string(&message).unwrap())) {
+        eprintln!("Failed to send client count update: {:?}", e);
     }
 }

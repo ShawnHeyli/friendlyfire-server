@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use axum::extract::{
     ws::{Message, WebSocket},
@@ -29,26 +29,35 @@ async fn handle_socket(mut socket: WebSocket, app_state: Arc<AppState>, _addr: S
         tokio::select! {
             msg= socket.recv() => {
                 if let Some(Ok(msg)) = msg{
+                    println!("Received socket: {:?}", &msg);
                     match msg{
                         Message::Text(msg) => {
-                            println!("Received socket: {:?}", &msg);
-                            if let Err(e) = tx.send(Message::Text(msg)) {
-                                eprintln!("Failed to send message: {:?}", e);
+                            // Parse the message
+                            match serde_json::from_str::<WsMessage>(&msg){
+                                Ok(message) => {
+                                    match message{
+                                        WsMessage::Media(media_message) => {
+                                            // Add the message to the queue
+                                            println!("Adding media message to queue: {:?}", &media_message);
+                                            app_state.timed_queue.add(media_message.clone(), Duration::from_millis(media_message.timeout())).await;
+                                        }
+                                        WsMessage::ClientCount(message) => {
+                                            if let Err(e) = tx.send(Message::Text(serde_json::to_string(&message).unwrap())){
+                                                eprintln!("Failed to send client count update: {:?}", e);
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!("Failed to parse message: {:?}", e);
+                                }
                             }
                         },
-                        Message::Binary(msg) =>
-                            println!("Received socket: {:?}", &msg),
-                        Message::Ping(msg) =>
-                            println!("Received socket: {:?}", &msg),
-                        Message::Pong(msg) =>
-                            println!("Received socket: {:?}", &msg),
-                        Message::Close(msg) => {
-                            println!("Received socket: {:?}", &msg);
+                        Message::Close(_msg) => {
                             handle_client_disconnect(tx.clone());
-                            drop(rx);
-                            drop(tx);
                             break;
                         }
+                        _ => {}
                     }
                 } else {
                     handle_client_disconnect(tx.clone());

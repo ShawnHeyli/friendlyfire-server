@@ -1,75 +1,150 @@
-use std::{collections::VecDeque, sync::Arc, time::Duration};
+use std::collections::VecDeque;
+use std::fmt::Debug;
+use std::sync::Arc;
+use tokio::sync::{broadcast, Mutex};
+use tokio::time::{sleep, Duration};
 
-use axum::extract::ws::Message;
-use tokio::{sync::Mutex, time::sleep};
-
-use crate::{MediaMessage, WsMessage};
-
-#[derive(Default)]
-pub struct MessageQueue {
-    queue: VecDeque<MediaMessage>,
+#[derive(Debug)]
+pub struct TimedQueue<T> {
+    queue: Arc<Mutex<VecDeque<(T, Duration)>>>,
+    sender: broadcast::Sender<T>,
 }
 
-impl MessageQueue {
+impl<T> TimedQueue<T>
+where
+    T: Send + Clone + 'static + Debug,
+{
     pub fn new() -> Self {
-        Self {
-            queue: VecDeque::new(),
-        }
+        let (sender, _receiver) = broadcast::channel(100);
+        let queue = Arc::new(Mutex::new(VecDeque::new()));
+
+        // Spawn a task to process the queue
+        tokio::spawn(Self::process_queue(queue.clone(), sender.clone()));
+
+        TimedQueue { queue, sender }
     }
 
-    // Add a message to the queue
-    pub fn enqueue(&mut self, message: MediaMessage) {
-        self.queue.push_back(message);
-    }
-
-    // Take the next message out of the queue (if available)
-    pub fn dequeue(&mut self) -> Option<MediaMessage> {
-        self.queue.pop_front()
-    }
-
-    // Check if the queue is empty
-    pub fn is_empty(&self) -> bool {
-        self.queue.is_empty()
-    }
-}
-
-pub struct MediaProcessor {
-    queue: Arc<Mutex<MessageQueue>>,
-}
-
-impl MediaProcessor {
-    pub fn new() -> Self {
-        Self {
-            queue: Arc::new(Mutex::new(MessageQueue::new())),
-        }
-    }
-
-    // Enqueue a message into the queue
-    pub async fn add_message(&self, message: MediaMessage) {
-        let mut queue = self.queue.lock().await;
-        queue.enqueue(message);
-    }
-
-    // Process the queue: send a message and wait for the timeout
-    pub async fn process_messages(&self) -> Result<(), ()> {
+    pub async fn process_queue(
+        queue: Arc<Mutex<VecDeque<(T, Duration)>>>,
+        sender: broadcast::Sender<T>,
+    ) {
         loop {
-            let next_message = {
-                let mut queue = self.queue.lock().await;
-                queue.dequeue()
-            };
+            let mut queue_guard = queue.lock().await;
+            if let Some((item, duration)) = queue_guard.pop_front() {
+                println!("Sending item: {:?}", item);
+                drop(queue_guard); // Release the lock while sending and sleeping
 
-            if let Some(message) = next_message {
-                // Send the message
-                let ws_message =
-                    Message::Text(serde_json::to_string(&WsMessage::Media(media)).unwrap());
-                message.send().await?;
+                // Send the item immediately
+                if sender.send(item).is_err() {
+                    break; // No active receivers
+                }
 
-                // Wait for the message timeout
-                sleep(Duration::from_millis(message.timeout)).await;
+                // Wait for the specified duration
+                sleep(duration).await;
             } else {
-                // If no messages are available, wait a little before checking again
+                // If the queue is empty, wait a bit before checking again
                 sleep(Duration::from_millis(100)).await;
             }
         }
+    }
+
+    pub async fn add(&self, item: T, delay: Duration) {
+        let mut queue_guard = self.queue.lock().await;
+        queue_guard.push_back((item, delay));
+    }
+
+    pub fn subscribe(&self) -> broadcast::Receiver<T> {
+        self.sender.subscribe()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::time::timeout;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn test_add_and_receive() {
+        let queue = TimedQueue::new();
+        let mut receiver = queue.subscribe();
+        let delay = Duration::from_millis(50);
+
+        queue.add(1, delay).await;
+        queue.add(2, delay).await;
+
+        let received1 = timeout(Duration::from_millis(100), receiver.recv())
+            .await
+            .unwrap();
+        assert_eq!(received1.unwrap(), 1);
+
+        let received2 = timeout(Duration::from_millis(100), receiver.recv())
+            .await
+            .unwrap();
+        assert_eq!(received2.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_empty_queue() {
+        let queue: TimedQueue<i32> = TimedQueue::new();
+
+        let mut receiver = queue.subscribe();
+        let received = timeout(Duration::from_millis(100), receiver.recv()).await;
+        assert!(received.is_err()); // Should timeout as the queue is empty
+    }
+
+    #[tokio::test]
+    async fn test_multiple_adds() {
+        let queue = TimedQueue::new();
+        let delay = Duration::from_millis(10);
+
+        for i in 0..10 {
+            queue.add(i, delay).await;
+        }
+
+        let mut receiver = queue.subscribe();
+        for i in 0..10 {
+            let received = timeout(Duration::from_millis(20), receiver.recv())
+                .await
+                .unwrap();
+            assert_eq!(received.unwrap(), i);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_timed_add() {
+        let queue = TimedQueue::new();
+        let delay = Duration::from_millis(100);
+
+        let start = tokio::time::Instant::now();
+        queue.add(42, delay).await;
+        let mut receiver = queue.subscribe();
+        let received = timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .unwrap();
+        let elapsed = start.elapsed();
+
+        assert_eq!(received.unwrap(), 42);
+        assert!(elapsed <= delay);
+    }
+
+    #[tokio::test]
+    async fn test_add_after_receive() {
+        let queue = TimedQueue::new();
+        let delay = Duration::from_millis(50);
+        let mut receiver = queue.subscribe();
+
+        queue.add(1, delay).await;
+        let received1 = timeout(Duration::from_millis(100), receiver.recv())
+            .await
+            .unwrap();
+        assert_eq!(received1.unwrap(), 1);
+
+        queue.add(2, delay).await;
+
+        let received2 = timeout(Duration::from_millis(100), receiver.recv())
+            .await
+            .unwrap();
+        assert_eq!(received2.unwrap(), 2);
     }
 }

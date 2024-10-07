@@ -1,3 +1,4 @@
+mod queue;
 mod upload;
 mod uploads;
 mod ws;
@@ -8,13 +9,28 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use tokio::sync::broadcast;
-use ws::ws_handler;
 use std::{net::SocketAddr, sync::Arc};
+use tokio::sync::broadcast;
+use ws::{ws_handler, WsMessage};
 
 #[tokio::main]
 async fn main() {
     let state = Arc::new(AppState::new());
+    let queue_tx = state.sender.clone();
+    let mut queue_rx = state.timed_queue.subscribe();
+
+    tokio::spawn(async move {
+        loop {
+            if let Ok(msg) = queue_rx.recv().await {
+                let ws_message =
+                    Message::Text(serde_json::to_string(&WsMessage::Media(msg)).unwrap());
+                if let Err(e) = queue_tx.send(ws_message) {
+                    eprintln!("Failed to send message to websocket clients: {:?}", e);
+                }
+            }
+        }
+    });
+
     let app = app(state);
 
     match tokio::net::TcpListener::bind("0.0.0.0:7331").await {
@@ -36,12 +52,14 @@ async fn main() {
 
 struct AppState {
     sender: broadcast::Sender<Message>,
+    timed_queue: queue::TimedQueue<ws::MediaMessage>,
 }
 
 impl AppState {
     fn new() -> Self {
         Self {
             sender: broadcast::channel(16).0,
+            timed_queue: queue::TimedQueue::new(),
         }
     }
 }
@@ -62,15 +80,13 @@ fn app(state: Arc<AppState>) -> Router {
 mod tests {
     use std::net::Ipv4Addr;
 
-    use axum::{
-        body, extract::connect_info::MockConnectInfo, http, response::IntoResponse,
-    };
+    use axum::{body, extract::connect_info::MockConnectInfo, http, response::IntoResponse};
     use futures_util::StreamExt;
     use http_body_util::BodyExt;
     use tokio_tungstenite::tungstenite;
     use tower::ServiceExt;
-    use ws::WsMessage;
     use ws::ClientCountMessage;
+    use ws::WsMessage;
 
     use super::*;
 
@@ -185,7 +201,7 @@ mod tests {
             tungstenite::Message::Text(text) => {
                 let msg: WsMessage = serde_json::from_str(&text).unwrap();
                 msg
-            },
+            }
             other => panic!("expected a text message but got {other:?}"),
         };
 

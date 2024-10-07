@@ -15,6 +15,12 @@ pub struct MediaMessage {
     timeout: u64, // in milliseconds
 }
 
+impl MediaMessage {
+    pub fn timeout(&self) -> u64 {
+        self.timeout
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 struct User {
     username: String,

@@ -4,10 +4,11 @@ permissions:
   contents: "write"
 
 
-on:
-  push:
-    branches:
-      - "release"
+workflow_run:
+  workflows: ["Tag"]
+  types:
+    - "completed"
+
 
 jobs:
   get-tag:
